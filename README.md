@@ -38,7 +38,7 @@ aws ecs update-service --cluster factorio --service factorio --desired-count 0
 This triple-nested monstrosity will get what you need
 
 ```shell
-aws ec2 describe-network-interfaces --network-interface-ids $( aws ecs describe-tasks --cluster pwmcintyre-factorio --tasks $( aws ecs list-tasks --cluster pwmcintyre-factorio --query 'taskArns[0]' --output text ) --query 'tasks[0].attachments[0].details[?name == `networkInterfaceId`].value | [0]'  --output text ) --query 'NetworkInterfaces[0].Association.PublicIp' --output text
+aws ec2 describe-network-interfaces --network-interface-ids $( aws ecs describe-tasks --cluster factorio --tasks $( aws ecs list-tasks --cluster factorio --query 'taskArns[0]' --output text ) --query 'tasks[0].attachments[0].details[?name == `networkInterfaceId`].value | [0]'  --output text ) --query 'NetworkInterfaces[0].Association.PublicIp' --output text
 ```
 
 ## Pricing
