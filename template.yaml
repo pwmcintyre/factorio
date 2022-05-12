@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Factorio
+
+
+Parameters:
+
+  Image:
+    Type: String
+    Default: factoriotools/factorio:stable
+
+
+Resources:
+
+  ############################
+  # Network
+  ############################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Sub ${ AWS::Region }a
+      MapPublicIpOnLaunch: true
+
+  # Allow outbound internet access
+  # This is required for various reasons - including:
+  # - access to download/update game files
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref RouteTable
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet
+
+  ############################
+  # Storage
+  ############################
+  EFS:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    Properties:
+      Encrypted: true
+      AvailabilityZoneName: !Sub ${ AWS::Region }a
+      LifecyclePolicies:
+      - TransitionToIA: AFTER_7_DAYS
+      - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+
+  EFSMount:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFS
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+      SubnetId: !Ref Subnet
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: !Ref AWS::StackName
+
+  ############################
+  # Hosting
+  ############################
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${ AWS::StackName }
+      CapacityProviders:
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 3
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ AWS::StackName }
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 2048
+      Memory: 4GB
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+      - Name: factorio
+        EFSVolumeConfiguration:
+          FilesystemId: !Ref EFS
+          TransitEncryption: ENABLED
+      ContainerDefinitions:
+        - Name: !Sub ${ AWS::StackName }
+          Image: !Ref Image
+          PortMappings:
+            - ContainerPort: 27015
+              Protocol: tcp
+            - ContainerPort: 34197
+              Protocol: udp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+          MountPoints:
+          - ContainerPath: /factorio
+            SourceVolume: factorio
+            ReadOnly: false
+          Environment:
+          - Name: UPDATE_MODS_ON_START
+            Value: false
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: !Ref AWS::StackName
+      SecurityGroupIngress:
+      - IpProtocol: udp
+        FromPort: 34197
+        ToPort: 34197
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 27015
+        ToPort: 27015
+        CidrIp: 0.0.0.0/0
+
+  SecurityGroupEFS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt SecurityGroup.GroupId
+      GroupId: !GetAtt EFSSecurityGroup.GroupId
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${ AWS::StackName }
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: 'true'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !GetAtt SecurityGroup.GroupId
+          Subnets:
+            - !Ref Subnet
